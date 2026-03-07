@@ -1537,7 +1537,7 @@ fn blacklisted_investor_excluded_from_distribution_filter() {
     let investors = [allowed.clone(), blocked.clone()];
     let eligible = investors
         .iter()
-        .filter(|inv| !client.is_blacklisted(&issuer, &symbol_short!("def"), &token, &inv))
+        .filter(|inv| !client.is_blacklisted(&issuer, &symbol_short!("def"), &token, inv))
         .count();
 
     assert_eq!(eligible, 1);
@@ -1810,8 +1810,8 @@ fn whitelist_enabled_only_includes_whitelisted_investors() {
     let eligible = investors
         .iter()
         .filter(|inv| {
-            let blacklisted = client.is_blacklisted(&issuer, &symbol_short!("def"), &token, &inv);
-            let whitelisted = client.is_whitelisted(&issuer, &symbol_short!("def"), &token, &inv);
+            let blacklisted = client.is_blacklisted(&issuer, &symbol_short!("def"), &token, inv);
+            let whitelisted = client.is_whitelisted(&issuer, &symbol_short!("def"), &token, inv);
 
             if blacklisted {
                 return false;
@@ -1845,8 +1845,8 @@ fn whitelist_disabled_includes_all_non_blacklisted() {
     let eligible = investors
         .iter()
         .filter(|inv| {
-            let blacklisted = client.is_blacklisted(&issuer, &symbol_short!("def"), &token, &inv);
-            let whitelisted = client.is_whitelisted(&issuer, &symbol_short!("def"), &token, &inv);
+            let blacklisted = client.is_blacklisted(&issuer, &symbol_short!("def"), &token, inv);
+            let whitelisted = client.is_whitelisted(&issuer, &symbol_short!("def"), &token, inv);
 
             if blacklisted {
                 return false;
@@ -3643,10 +3643,9 @@ fn simulate_distribution_read_only_no_state_change() {
 
     let mut shares = Vec::new(&env);
     shares.push_back((holder.clone(), 10_000u32));
-    let _ =
-        client.simulate_distribution(&issuer, &symbol_short!("def"), &token, &1_000_000, &shares);
+    client.simulate_distribution(&issuer, &symbol_short!("def"), &token, &1_000_000, &shares);
     let count_before = client.get_period_count(&issuer, &symbol_short!("def"), &token);
-    let _ = client.simulate_distribution(&issuer, &symbol_short!("def"), &token, &999_999, &shares);
+    client.simulate_distribution(&issuer, &symbol_short!("def"), &token, &999_999, &shares);
     assert_eq!(client.get_period_count(&issuer, &symbol_short!("def"), &token), count_before);
 }
 
@@ -5686,7 +5685,7 @@ fn calculate_distribution_rounds_down_exact() {
             &symbol_short!("def"),
             &token,
             &payout_asset,
-            &((100) as i128),
+            &100_i128,
             &p,
             &false,
         );
@@ -6089,7 +6088,7 @@ fn test_event_only_mode_register_and_report() {
 
     // Verify event emitted (skip checking EVENT_INIT)
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(&symbol_short!("offer_reg").into_val(&env))));
+    assert!(events.iter().any(|e| e.1.contains(symbol_short!("offer_reg").into_val(&env))));
 
     // Storage should be empty for this offering
     assert!(client.get_offering(&issuer, &symbol_short!("def"), &token).is_none());
@@ -6107,8 +6106,8 @@ fn test_event_only_mode_register_and_report() {
     );
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(&symbol_short!("rev_init").into_val(&env))));
-    assert!(events.iter().any(|e| e.1.contains(&symbol_short!("rev_rep").into_val(&env))));
+    assert!(events.iter().any(|e| e.1.contains(symbol_short!("rev_init").into_val(&env))));
+    assert!(events.iter().any(|e| e.1.contains(symbol_short!("rev_rep").into_val(&env))));
 
     // Audit summary should NOT be updated
     assert!(client.get_audit_summary(&issuer, &symbol_short!("def"), &token).is_none());
@@ -6134,7 +6133,7 @@ fn test_event_only_mode_blacklist() {
     client.blacklist_add(&issuer, &issuer, &symbol_short!("def"), &token, &investor);
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(&symbol_short!("bl_add").into_val(&env))));
+    assert!(events.iter().any(|e| e.1.contains(symbol_short!("bl_add").into_val(&env))));
 
     assert!(!client.is_blacklisted(&issuer, &symbol_short!("def"), &token, &investor));
     assert_eq!(client.get_blacklist(&issuer, &symbol_short!("def"), &token).len(), 0);
@@ -6156,7 +6155,7 @@ fn test_event_only_mode_testnet_config() {
     client.set_testnet_mode(&true);
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(&symbol_short!("test_mode").into_val(&env))));
+    assert!(events.iter().any(|e| e.1.contains(symbol_short!("test_mode").into_val(&env))));
 
     assert!(!client.is_testnet_mode());
 }
@@ -7291,7 +7290,7 @@ mod regression {
 
         match op {
             0 => {
-                let _ = client.try_register_offering(
+                client.try_register_offering(
                     &issuer,
                     &symbol_short!("def"),
                     &token,
@@ -7303,7 +7302,7 @@ mod regression {
             1 => {
                 let amount = (next_u64(seed) % 1_000_000 + 1) as i128;
                 let period_id = next_period(seed) % 1_000_000 + 1;
-                let _ = client.try_report_revenue(
+                client.try_report_revenue(
                     &issuer,
                     &symbol_short!("def"),
                     &token,
@@ -7314,7 +7313,7 @@ mod regression {
                 );
             }
             2 => {
-                let _ = client.try_set_concentration_limit(
+                client.try_set_concentration_limit(
                     &issuer,
                     &symbol_short!("def"),
                     &token,
@@ -7324,12 +7323,7 @@ mod regression {
             }
             3 => {
                 let conc_bps = (next_u64(seed) % 10_001) as u32;
-                let _ = client.try_report_concentration(
-                    &issuer,
-                    &symbol_short!("def"),
-                    &token,
-                    &conc_bps,
-                );
+                client.try_report_concentration(&issuer, &symbol_short!("def"), &token, &conc_bps);
             }
             4 => {
                 let holder = Address::generate(env);
@@ -7394,7 +7388,7 @@ mod regression {
         pay1.push_back(Address::generate(&env1));
         let mut seed1 = INVARIANT_SEED;
         for _ in 0..16 {
-            let _ = client1.try_register_offering(
+            client1.try_register_offering(
                 &iss1.get(0).unwrap(),
                 &symbol_short!("def"),
                 &tok1.get(0).unwrap(),
@@ -7417,7 +7411,7 @@ mod regression {
         pay2.push_back(Address::generate(&env2));
         let mut seed2 = INVARIANT_SEED;
         for _ in 0..16 {
-            let _ = client2.try_register_offering(
+            client2.try_register_offering(
                 &iss2.get(0).unwrap(),
                 &symbol_short!("def"),
                 &tok2.get(0).unwrap(),

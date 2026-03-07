@@ -66,6 +66,6 @@ fn test_same_issuer_different_namespaces() {
     client.set_snapshot_config(&issuer, &ns_1, &token, &true);
     client.set_snapshot_config(&issuer, &ns_2, &token, &false);
 
-    assert_eq!(client.get_snapshot_config(&issuer, &ns_1, &token), true);
-    assert_eq!(client.get_snapshot_config(&issuer, &ns_2, &token), false);
+    assert!(client.get_snapshot_config(&issuer, &ns_1, &token));
+    assert!(!client.get_snapshot_config(&issuer, &ns_2, &token));
 }

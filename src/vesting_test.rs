@@ -19,7 +19,7 @@ fn initialize_sets_admin() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, _b, _t) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn create_schedule_success() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
 
     let total = 1_000_000_i128;
     let start = 1000_u64;
@@ -53,7 +53,7 @@ fn get_claimable_before_cliff_is_zero() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
 
     let total = 1_000_000_i128;
     let start = 1000_u64;
@@ -71,10 +71,10 @@ fn cancel_schedule() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
     client.create_schedule(&admin, &beneficiary, &token_id, &1_000_000, &1000, &100, &2000);
 
-    let _ = client.cancel_schedule(&admin, &beneficiary, &0);
+    client.cancel_schedule(&admin, &beneficiary, &0);
     let schedule = client.get_schedule(&admin, &0);
     assert!(schedule.cancelled);
 }
@@ -84,7 +84,7 @@ fn multiple_schedules_same_beneficiary() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
 
     client.create_schedule(&admin, &beneficiary, &token_id, &100, &1000, &0, &1000);
     client.create_schedule(&admin, &beneficiary, &token_id, &200, &2000, &0, &1000);
@@ -96,7 +96,7 @@ fn zero_duration_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
     let r = client.try_create_schedule(&admin, &beneficiary, &token_id, &1000, &1000, &0, &0);
     assert!(r.is_err());
 }
@@ -106,7 +106,7 @@ fn cliff_longer_than_duration_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, beneficiary, token_id) = setup(&env);
-    let _ = client.initialize_vesting(&admin);
+    client.initialize_vesting(&admin);
     let r = client.try_create_schedule(&admin, &beneficiary, &token_id, &1000, &1000, &2000, &1000);
     assert!(r.is_err());
 }
