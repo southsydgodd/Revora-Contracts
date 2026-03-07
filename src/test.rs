@@ -6088,7 +6088,8 @@ fn test_event_only_mode_register_and_report() {
 
     // Verify event emitted (skip checking EVENT_INIT)
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(symbol_short!("offer_reg").into_val(&env))));
+    let offer_reg_val = symbol_short!("offer_reg").into_val(&env);
+    assert!(events.iter().any(|e| e.1.contains(&offer_reg_val)));
 
     // Storage should be empty for this offering
     assert!(client.get_offering(&issuer, &symbol_short!("def"), &token).is_none());
@@ -6106,8 +6107,10 @@ fn test_event_only_mode_register_and_report() {
     );
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(symbol_short!("rev_init").into_val(&env))));
-    assert!(events.iter().any(|e| e.1.contains(symbol_short!("rev_rep").into_val(&env))));
+    let rev_init_val = symbol_short!("rev_init").into_val(&env);
+    let rev_rep_val = symbol_short!("rev_rep").into_val(&env);
+    assert!(events.iter().any(|e| e.1.contains(&rev_init_val)));
+    assert!(events.iter().any(|e| e.1.contains(&rev_rep_val)));
 
     // Audit summary should NOT be updated
     assert!(client.get_audit_summary(&issuer, &symbol_short!("def"), &token).is_none());
@@ -6133,7 +6136,8 @@ fn test_event_only_mode_blacklist() {
     client.blacklist_add(&issuer, &issuer, &symbol_short!("def"), &token, &investor);
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(symbol_short!("bl_add").into_val(&env))));
+    let bl_add_val = symbol_short!("bl_add").into_val(&env);
+    assert!(events.iter().any(|e| e.1.contains(&bl_add_val)));
 
     assert!(!client.is_blacklisted(&issuer, &symbol_short!("def"), &token, &investor));
     assert_eq!(client.get_blacklist(&issuer, &symbol_short!("def"), &token).len(), 0);
@@ -6155,7 +6159,8 @@ fn test_event_only_mode_testnet_config() {
     client.set_testnet_mode(&true);
 
     let events = env.events().all();
-    assert!(events.iter().any(|e| e.1.contains(symbol_short!("test_mode").into_val(&env))));
+    let test_mode_val = symbol_short!("test_mode").into_val(&env);
+    assert!(events.iter().any(|e| e.1.contains(&test_mode_val)));
 
     assert!(!client.is_testnet_mode());
 }
