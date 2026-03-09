@@ -7086,3 +7086,130 @@ fn aggregation_stress_many_offerings() {
     assert_eq!(metrics.total_report_count, 20);
 }
 } // mod regression
+
+// ===========================================================================
+// End-to-End Scenarios
+// ===========================================================================
+mod scenarios {
+    use super::*;
+
+    #[test]
+    fn happy_path_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = make_client(&env);
+
+        let issuer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let payout_asset = Address::generate(&env);
+
+        let investor_a = Address::generate(&env);
+        let investor_b = Address::generate(&env);
+
+        // 1. Issuer registers offering with 50% revenue share (5000 bps)
+        client.register_offering(&issuer, &symbol_short!("def"), &token, &5_000, &payout_asset, &0);
+
+        // 2. Report revenue for period 1
+        // total_revenue = 1,000,000
+        // distributable = 1,000,000 * 50% = 500,000
+        client.report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &1_000_000, &1, &false);
+
+        // 3. Investors set their shares for period 1 (Total supply 100)
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &1, &investor_a, &60); // 60%
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &1, &investor_b, &40); // 40%
+
+        // 4. Report revenue for period 2
+        // total_revenue = 2,000,000
+        // distributable = 2,000,000 * 50% = 1,000,000
+        client.report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &2_000_000, &2, &false);
+
+        // 5. Investors' shares shift for period 2
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &2, &investor_a, &20); // 20%
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &2, &investor_b, &80); // 80%
+
+        // 6. Investor A claims all available periods (1 and 2)
+        // expected_payout_a_p1 = 500,000 * 60 / 100 = 300,000
+        // expected_payout_a_p2 = 1,000,000 * 20 / 100 = 200,000
+        // total = 500,000
+        let claimable_a = client.get_claimable(&issuer, &symbol_short!("def"), &token, &investor_a);
+        assert_eq!(claimable_a, 500_000);
+        let payout_a = client.claim(&issuer, &symbol_short!("def"), &token, &investor_a, &0);
+        assert_eq!(payout_a, 500_000);
+
+        // 7. Investor B claims all available periods
+        // expected_payout_b_p1 = 500,000 * 40 / 100 = 200,000
+        // expected_payout_b_p2 = 1,000,000 * 80 / 100 = 800,000
+        // total = 1,000,000
+        let claimable_b = client.get_claimable(&issuer, &symbol_short!("def"), &token, &investor_b);
+        assert_eq!(claimable_b, 1_000_000);
+        let payout_b = client.claim(&issuer, &symbol_short!("def"), &token, &investor_b, &0);
+        assert_eq!(payout_b, 1_000_000);
+
+        // Verify no pending claims
+        let remaining_a = client.get_unclaimed_periods(&issuer, &symbol_short!("def"), &token, &investor_a);
+        assert!(remaining_a.is_empty());
+        let claimable_b_after = client.get_claimable(&issuer, &symbol_short!("def"), &token, &investor_b);
+        assert_eq!(claimable_b_after, 0);
+
+        // Verify aggregation totals
+        let metrics = client.get_platform_aggregation();
+        assert_eq!(metrics.total_reported_revenue, 3_000_000);
+        assert_eq!(metrics.total_report_count, 2);
+    }
+
+    #[test]
+    fn failure_and_correction_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = make_client(&env);
+
+        let issuer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let payout_asset = Address::generate(&env);
+        let investor = Address::generate(&env);
+
+        // 1. Offering registered with 100% revenue share and a time delay (86400 secs)
+        client.register_offering(&issuer, &symbol_short!("def"), &token, &10_000, &payout_asset, &86400);
+
+        // 2. Issuer attempts to report negative revenue (validation should reject)
+        let res = client.try_report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &-500, &1, &false);
+        assert!(res.is_err());
+
+        // 3. Issuer successfully reports valid revenue for period 1
+        client.report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &100_000, &1, &false);
+
+        // 4. Investor is assigned 100% share for period 1
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &1, &investor, &100);
+
+        // 5. Investor tries to claim but delay has not elapsed
+        let claim_preview = client.get_claimable(&issuer, &symbol_short!("def"), &token, &investor);
+        assert_eq!(claim_preview, 0); // Preview returns 0 since delay hasn't passed
+        let claim_res = client.try_claim(&issuer, &symbol_short!("def"), &token, &investor, &0);
+        assert!(claim_res.is_err(), "Claim should fail due to delay not elapsed");
+
+        // 6. Fast forward time by 2 days
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2 * 86400);
+
+        // 7. Issuer corrects the revenue report for period 1 via override (changes to 50_000)
+        client.report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &50_000, &1, &true);
+
+        // 8. Investor successfully claims after delay and override
+        let claim_preview_after = client.get_claimable(&issuer, &symbol_short!("def"), &token, &investor);
+        assert_eq!(claim_preview_after, 50_000, "Preview should reflect overridden amount and passed delay");
+        
+        let payout = client.claim(&issuer, &symbol_short!("def"), &token, &investor, &0);
+        assert_eq!(payout, 50_000);
+
+        // 9. Issuer blacklists investor to prevent future claims
+        client.blacklist_add(&issuer, &issuer, &symbol_short!("def"), &token, &investor);
+
+        // 10. Issuer reports revenue for period 2
+        client.report_revenue(&issuer, &symbol_short!("def"), &token, &payout_asset, &200_000, &2, &false);
+        client.set_holder_share(&issuer, &symbol_short!("def"), &token, &2, &investor, &100);
+
+        // 11. Investor attempts claim but is blocked by blacklist
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2 * 86400); // pass delay
+        let claim_res_blocked = client.try_claim(&issuer, &symbol_short!("def"), &token, &investor, &0);
+        assert!(claim_res_blocked.is_err(), "Claim should fail due to blacklist");
+    }
+}
