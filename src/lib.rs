@@ -58,16 +58,18 @@ pub enum RevoraError {
     InvalidPeriodId = 22,
     /// Deposit would exceed the offering's supply cap (#96).
     SupplyCapExceeded = 23,
+    /// Metadata format is invalid for configured scheme rules.
+    MetadataInvalidFormat = 24,
     /// Current ledger timestamp is outside configured reporting window.
-    ReportingWindowClosed = 24,
+    ReportingWindowClosed = 25,
     /// Current ledger timestamp is outside configured claiming window.
-    ClaimWindowClosed = 25,
+    ClaimWindowClosed = 26,
     /// Off-chain signature has expired.
-    SignatureExpired = 26,
+    SignatureExpired = 27,
     /// Signature nonce has already been used.
-    SignatureReplay = 27,
+    SignatureReplay = 28,
     /// Off-chain signer key has not been registered.
-    SignerKeyNotRegistered = 28,
+    SignerKeyNotRegistered = 29,
 }
 
 // ── Event symbols ────────────────────────────────────────────
@@ -3238,6 +3240,43 @@ impl RevoraRevenueShare {
     /// Maximum allowed length for metadata strings (256 bytes).
     /// Supports IPFS CIDs (46 chars), URLs, and content hashes.
     const MAX_METADATA_LENGTH: usize = 256;
+    const META_SCHEME_IPFS: &'static [u8] = b"ipfs://";
+    const META_SCHEME_HTTPS: &'static [u8] = b"https://";
+    const META_SCHEME_AR: &'static [u8] = b"ar://";
+    const META_SCHEME_SHA256: &'static [u8] = b"sha256:";
+
+    fn has_prefix(bytes: &[u8], prefix: &[u8]) -> bool {
+        if bytes.len() < prefix.len() {
+            return false;
+        }
+        for i in 0..prefix.len() {
+            if bytes[i] != prefix[i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn validate_metadata_reference(metadata: &String) -> Result<(), RevoraError> {
+        if metadata.len() == 0 {
+            return Ok(());
+        }
+        if metadata.len() > Self::MAX_METADATA_LENGTH as u32 {
+            return Err(RevoraError::MetadataTooLarge);
+        }
+        let mut bytes = [0u8; Self::MAX_METADATA_LENGTH];
+        let len = metadata.len() as usize;
+        metadata.copy_into_slice(&mut bytes[0..len]);
+        let slice = &bytes[0..len];
+        if Self::has_prefix(slice, Self::META_SCHEME_IPFS)
+            || Self::has_prefix(slice, Self::META_SCHEME_HTTPS)
+            || Self::has_prefix(slice, Self::META_SCHEME_AR)
+            || Self::has_prefix(slice, Self::META_SCHEME_SHA256)
+        {
+            return Ok(());
+        }
+        Err(RevoraError::MetadataInvalidFormat)
+    }
 
     /// Set or update metadata reference for an offering.
     ///
@@ -3272,11 +3311,8 @@ impl RevoraRevenueShare {
 
         issuer.require_auth();
 
-        // Validate metadata length
-        let metadata_bytes = metadata.len();
-        if metadata_bytes > Self::MAX_METADATA_LENGTH as u32 {
-            return Err(RevoraError::MetadataTooLarge);
-        }
+        // Validate metadata length and allowed scheme prefixes.
+        Self::validate_metadata_reference(&metadata)?;
 
         let key = DataKey::OfferingMetadata(offering_id);
         let is_update = env.storage().persistent().has(&key);
