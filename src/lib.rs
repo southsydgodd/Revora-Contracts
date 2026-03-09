@@ -58,6 +58,10 @@ pub enum RevoraError {
     InvalidPeriodId = 22,
     /// Deposit would exceed the offering's supply cap (#96).
     SupplyCapExceeded = 23,
+    /// Current ledger timestamp is outside configured reporting window.
+    ReportingWindowClosed = 24,
+    /// Current ledger timestamp is outside configured claiming window.
+    ClaimWindowClosed = 25,
 }
 
 // ── Event symbols ────────────────────────────────────────────
@@ -158,6 +162,8 @@ const EVENT_TYPE_REV_OVR: Symbol = symbol_short!("rv_ovr");
 const EVENT_TYPE_REV_REJ: Symbol = symbol_short!("rv_rej");
 const EVENT_TYPE_REV_REP: Symbol = symbol_short!("rv_rep");
 const EVENT_TYPE_CLAIM: Symbol = symbol_short!("claim");
+const EVENT_REPORT_WINDOW_SET: Symbol = symbol_short!("rep_win");
+const EVENT_CLAIM_WINDOW_SET: Symbol = symbol_short!("clm_win");
 
 const BPS_DENOMINATOR: i128 = 10_000;
 
@@ -259,6 +265,20 @@ pub struct EventIndexTopicV2 {
     pub token: Address,
     /// 0 when the event is not period-scoped.
     pub period_id: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessWindow {
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum WindowDataKey {
+    Report(OfferingId),
+    Claim(OfferingId),
 }
 
 /// Defines how fractional shares are handled during distribution calculations.
@@ -409,6 +429,38 @@ impl RevoraRevenueShare {
         let key = DataKey::Frozen;
         if env.storage().persistent().get::<DataKey, bool>(&key).unwrap_or(false) {
             return Err(RevoraError::ContractFrozen);
+        }
+        Ok(())
+    }
+
+    fn validate_window(window: &AccessWindow) -> Result<(), RevoraError> {
+        if window.start_timestamp > window.end_timestamp {
+            return Err(RevoraError::LimitReached);
+        }
+        Ok(())
+    }
+
+    fn is_window_open(env: &Env, window: &AccessWindow) -> bool {
+        let now = env.ledger().timestamp();
+        now >= window.start_timestamp && now <= window.end_timestamp
+    }
+
+    fn require_report_window_open(env: &Env, offering_id: &OfferingId) -> Result<(), RevoraError> {
+        let key = WindowDataKey::Report(offering_id.clone());
+        if let Some(window) = env.storage().persistent().get::<WindowDataKey, AccessWindow>(&key) {
+            if !Self::is_window_open(env, &window) {
+                return Err(RevoraError::ReportingWindowClosed);
+            }
+        }
+        Ok(())
+    }
+
+    fn require_claim_window_open(env: &Env, offering_id: &OfferingId) -> Result<(), RevoraError> {
+        let key = WindowDataKey::Claim(offering_id.clone());
+        if let Some(window) = env.storage().persistent().get::<WindowDataKey, AccessWindow>(&key) {
+            if !Self::is_window_open(env, &window) {
+                return Err(RevoraError::ClaimWindowClosed);
+            }
         }
         Ok(())
     }
@@ -872,6 +924,7 @@ impl RevoraRevenueShare {
             namespace: namespace.clone(),
             token: token.clone(),
         };
+        Self::require_report_window_open(&env, &offering_id)?;
 
         if !event_only {
             // Verify offering exists and issuer is current
@@ -1957,6 +2010,7 @@ impl RevoraRevenueShare {
         }
 
         let offering_id = OfferingId { issuer, namespace, token };
+        Self::require_claim_window_open(&env, &offering_id)?;
 
         let count_key = DataKey::PeriodCount(offering_id.clone());
         let period_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -2043,6 +2097,124 @@ impl RevoraRevenueShare {
         );
 
         Ok(total_payout)
+    }
+
+    /// Configure the reporting access window for an offering.
+    /// If unset, reporting remains always permitted.
+    pub fn set_report_window(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+        start_timestamp: u64,
+        end_timestamp: u64,
+    ) -> Result<(), RevoraError> {
+        Self::require_not_frozen(&env)?;
+        let current_issuer = Self::get_current_issuer(
+            &env,
+            issuer.clone(),
+            namespace.clone(),
+            token.clone(),
+        )
+        .ok_or(RevoraError::OfferingNotFound)?;
+        if current_issuer != issuer {
+            return Err(RevoraError::OfferingNotFound);
+        }
+        issuer.require_auth();
+        let window = AccessWindow {
+            start_timestamp,
+            end_timestamp,
+        };
+        Self::validate_window(&window)?;
+        let offering_id = OfferingId {
+            issuer: issuer.clone(),
+            namespace: namespace.clone(),
+            token: token.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&WindowDataKey::Report(offering_id), &window);
+        env.events().publish(
+            (EVENT_REPORT_WINDOW_SET, issuer, namespace, token),
+            (start_timestamp, end_timestamp),
+        );
+        Ok(())
+    }
+
+    /// Configure the claiming access window for an offering.
+    /// If unset, claiming remains always permitted.
+    pub fn set_claim_window(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+        start_timestamp: u64,
+        end_timestamp: u64,
+    ) -> Result<(), RevoraError> {
+        Self::require_not_frozen(&env)?;
+        let current_issuer = Self::get_current_issuer(
+            &env,
+            issuer.clone(),
+            namespace.clone(),
+            token.clone(),
+        )
+        .ok_or(RevoraError::OfferingNotFound)?;
+        if current_issuer != issuer {
+            return Err(RevoraError::OfferingNotFound);
+        }
+        issuer.require_auth();
+        let window = AccessWindow {
+            start_timestamp,
+            end_timestamp,
+        };
+        Self::validate_window(&window)?;
+        let offering_id = OfferingId {
+            issuer: issuer.clone(),
+            namespace: namespace.clone(),
+            token: token.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&WindowDataKey::Claim(offering_id), &window);
+        env.events().publish(
+            (EVENT_CLAIM_WINDOW_SET, issuer, namespace, token),
+            (start_timestamp, end_timestamp),
+        );
+        Ok(())
+    }
+
+    /// Read configured reporting window (if any) for an offering.
+    pub fn get_report_window(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+    ) -> Option<AccessWindow> {
+        let offering_id = OfferingId {
+            issuer,
+            namespace,
+            token,
+        };
+        env.storage()
+            .persistent()
+            .get(&WindowDataKey::Report(offering_id))
+    }
+
+    /// Read configured claiming window (if any) for an offering.
+    pub fn get_claim_window(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+    ) -> Option<AccessWindow> {
+        let offering_id = OfferingId {
+            issuer,
+            namespace,
+            token,
+        };
+        env.storage()
+            .persistent()
+            .get(&WindowDataKey::Claim(offering_id))
     }
 
     /// Return unclaimed period IDs for a holder on an offering.
