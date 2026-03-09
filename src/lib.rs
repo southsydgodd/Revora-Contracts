@@ -2,8 +2,8 @@
 #![deny(unsafe_code)]
 #![deny(clippy::dbg_macro, clippy::todo, clippy::unimplemented)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, Map,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    BytesN, Env, Map, String, Symbol, Vec,
 };
 
 /// Centralized contract error codes. Auth failures are signaled by host panic (require_auth).
@@ -62,6 +62,12 @@ pub enum RevoraError {
     ReportingWindowClosed = 24,
     /// Current ledger timestamp is outside configured claiming window.
     ClaimWindowClosed = 25,
+    /// Off-chain signature has expired.
+    SignatureExpired = 26,
+    /// Signature nonce has already been used.
+    SignatureReplay = 27,
+    /// Off-chain signer key has not been registered.
+    SignerKeyNotRegistered = 28,
 }
 
 // ── Event symbols ────────────────────────────────────────────
@@ -164,6 +170,10 @@ const EVENT_TYPE_REV_REP: Symbol = symbol_short!("rv_rep");
 const EVENT_TYPE_CLAIM: Symbol = symbol_short!("claim");
 const EVENT_REPORT_WINDOW_SET: Symbol = symbol_short!("rep_win");
 const EVENT_CLAIM_WINDOW_SET: Symbol = symbol_short!("clm_win");
+const EVENT_META_SIGNER_SET: Symbol = symbol_short!("meta_key");
+const EVENT_META_DELEGATE_SET: Symbol = symbol_short!("meta_del");
+const EVENT_META_SHARE_SET: Symbol = symbol_short!("meta_shr");
+const EVENT_META_REV_APPROVE: Symbol = symbol_short!("meta_rev");
 
 const BPS_DENOMINATOR: i128 = 10_000;
 
@@ -267,6 +277,48 @@ pub struct EventIndexTopicV2 {
     pub period_id: u64,
 }
 
+/// Versioned domain-separated payload for off-chain authorized actions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaAuthorization {
+    pub version: u32,
+    pub contract: Address,
+    pub signer: Address,
+    pub nonce: u64,
+    pub expiry: u64,
+    pub action: MetaAction,
+}
+
+/// Off-chain authorized action variants.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MetaAction {
+    SetHolderShare(MetaSetHolderSharePayload),
+    ApproveRevenueReport(MetaRevenueApprovalPayload),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaSetHolderSharePayload {
+    pub issuer: Address,
+    pub namespace: Symbol,
+    pub token: Address,
+    pub holder: Address,
+    pub share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaRevenueApprovalPayload {
+    pub issuer: Address,
+    pub namespace: Symbol,
+    pub token: Address,
+    pub payout_asset: Address,
+    pub amount: i128,
+    pub period_id: u64,
+    pub override_existing: bool,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccessWindow {
@@ -279,6 +331,19 @@ pub struct AccessWindow {
 pub enum WindowDataKey {
     Report(OfferingId),
     Claim(OfferingId),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MetaDataKey {
+    /// Off-chain signer public key (ed25519) bound to signer address.
+    SignerKey(Address),
+    /// Offering-scoped delegate signer allowed for meta-actions.
+    Delegate(OfferingId),
+    /// Replay protection key: signer + nonce consumed marker.
+    NonceUsed(Address, u64),
+    /// Approved revenue report marker keyed by offering and period.
+    RevenueApproved(OfferingId, u64),
 }
 
 /// Defines how fractional shares are handled during distribution calculations.
@@ -416,6 +481,8 @@ pub struct RevoraRevenueShare;
 
 #[contractimpl]
 impl RevoraRevenueShare {
+    const META_AUTH_VERSION: u32 = 1;
+
     fn is_event_versioning_enabled(env: Env) -> bool {
         let key = DataKey::EventVersioningEnabled;
         env.storage()
@@ -436,6 +503,22 @@ impl RevoraRevenueShare {
     fn validate_window(window: &AccessWindow) -> Result<(), RevoraError> {
         if window.start_timestamp > window.end_timestamp {
             return Err(RevoraError::LimitReached);
+        }
+        Ok(())
+    }
+
+    fn require_valid_meta_nonce_and_expiry(
+        env: &Env,
+        signer: &Address,
+        nonce: u64,
+        expiry: u64,
+    ) -> Result<(), RevoraError> {
+        if env.ledger().timestamp() > expiry {
+            return Err(RevoraError::SignatureExpired);
+        }
+        let nonce_key = MetaDataKey::NonceUsed(signer.clone(), nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err(RevoraError::SignatureReplay);
         }
         Ok(())
     }
@@ -462,6 +545,63 @@ impl RevoraRevenueShare {
                 return Err(RevoraError::ClaimWindowClosed);
             }
         }
+        Ok(())
+    }
+
+    fn mark_meta_nonce_used(env: &Env, signer: &Address, nonce: u64) {
+        let nonce_key = MetaDataKey::NonceUsed(signer.clone(), nonce);
+        env.storage().persistent().set(&nonce_key, &true);
+    }
+
+    fn verify_meta_signature(
+        env: &Env,
+        signer: &Address,
+        nonce: u64,
+        expiry: u64,
+        action: MetaAction,
+        signature: &BytesN<64>,
+    ) -> Result<(), RevoraError> {
+        Self::require_valid_meta_nonce_and_expiry(env, signer, nonce, expiry)?;
+        let pk_key = MetaDataKey::SignerKey(signer.clone());
+        let public_key: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&pk_key)
+            .ok_or(RevoraError::SignerKeyNotRegistered)?;
+        let payload = MetaAuthorization {
+            version: Self::META_AUTH_VERSION,
+            contract: env.current_contract_address(),
+            signer: signer.clone(),
+            nonce,
+            expiry,
+            action,
+        };
+        let payload_bytes = payload.to_xdr(env);
+        env.crypto().ed25519_verify(&public_key, &payload_bytes, signature);
+        Ok(())
+    }
+
+    fn set_holder_share_internal(
+        env: &Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+        holder: Address,
+        share_bps: u32,
+    ) -> Result<(), RevoraError> {
+        if share_bps > 10_000 {
+            return Err(RevoraError::InvalidShareBps);
+        }
+        let offering_id = OfferingId {
+            issuer: issuer.clone(),
+            namespace: namespace.clone(),
+            token: token.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::HolderShare(offering_id, holder.clone()), &share_bps);
+        env.events()
+            .publish((EVENT_SHARE_SET, issuer, namespace, token), (holder, share_bps));
         Ok(())
     }
 
@@ -1956,15 +2096,197 @@ impl RevoraRevenueShare {
         }
 
         issuer.require_auth();
+        Self::set_holder_share_internal(&env, offering_id.issuer, offering_id.namespace, offering_id.token, holder, share_bps)
+    }
 
-        if share_bps > 10_000 {
-            return Err(RevoraError::InvalidShareBps);
+    /// Register an ed25519 public key for a signer address.
+    /// The signer must authorize this binding.
+    pub fn register_meta_signer_key(
+        env: Env,
+        signer: Address,
+        public_key: BytesN<32>,
+    ) -> Result<(), RevoraError> {
+        signer.require_auth();
+        env.storage()
+            .persistent()
+            .set(&MetaDataKey::SignerKey(signer.clone()), &public_key);
+        env.events()
+            .publish((EVENT_META_SIGNER_SET, signer), public_key);
+        Ok(())
+    }
+
+    /// Set or update an offering-level delegate signer for off-chain authorizations.
+    /// Only the current issuer may set this value.
+    pub fn set_meta_delegate(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+        delegate: Address,
+    ) -> Result<(), RevoraError> {
+        Self::require_not_frozen(&env)?;
+        let current_issuer = Self::get_current_issuer(
+            &env,
+            issuer.clone(),
+            namespace.clone(),
+            token.clone(),
+        )
+        .ok_or(RevoraError::OfferingNotFound)?;
+        if current_issuer != issuer {
+            return Err(RevoraError::OfferingNotFound);
         }
+        issuer.require_auth();
+        let offering_id = OfferingId {
+            issuer: issuer.clone(),
+            namespace: namespace.clone(),
+            token: token.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&MetaDataKey::Delegate(offering_id), &delegate);
+        env.events()
+            .publish((EVENT_META_DELEGATE_SET, issuer, namespace, token), delegate);
+        Ok(())
+    }
 
-        let key = DataKey::HolderShare(offering_id, holder.clone());
-        env.storage().persistent().set(&key, &share_bps);
+    /// Get the configured offering-level delegate signer.
+    pub fn get_meta_delegate(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+    ) -> Option<Address> {
+        let offering_id = OfferingId {
+            issuer,
+            namespace,
+            token,
+        };
+        env.storage()
+            .persistent()
+            .get(&MetaDataKey::Delegate(offering_id))
+    }
 
-        env.events().publish((EVENT_SHARE_SET, issuer, namespace, token), (holder, share_bps));
+    /// Meta-transaction variant of `set_holder_share`.
+    /// A registered delegate signer authorizes this action via off-chain ed25519 signature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn meta_set_holder_share(
+        env: Env,
+        signer: Address,
+        payload: MetaSetHolderSharePayload,
+        nonce: u64,
+        expiry: u64,
+        signature: BytesN<64>,
+    ) -> Result<(), RevoraError> {
+        Self::require_not_frozen(&env)?;
+        Self::require_not_paused(&env);
+        let current_issuer = Self::get_current_issuer(
+            &env,
+            payload.issuer.clone(),
+            payload.namespace.clone(),
+            payload.token.clone(),
+        )
+        .ok_or(RevoraError::OfferingNotFound)?;
+        if current_issuer != payload.issuer {
+            return Err(RevoraError::OfferingNotFound);
+        }
+        let offering_id = OfferingId {
+            issuer: payload.issuer.clone(),
+            namespace: payload.namespace.clone(),
+            token: payload.token.clone(),
+        };
+        let configured_delegate: Address = env
+            .storage()
+            .persistent()
+            .get(&MetaDataKey::Delegate(offering_id))
+            .ok_or(RevoraError::NotAuthorized)?;
+        if configured_delegate != signer {
+            return Err(RevoraError::NotAuthorized);
+        }
+        let action = MetaAction::SetHolderShare(payload.clone());
+        Self::verify_meta_signature(&env, &signer, nonce, expiry, action, &signature)?;
+        Self::set_holder_share_internal(
+            &env,
+            payload.issuer.clone(),
+            payload.namespace.clone(),
+            payload.token.clone(),
+            payload.holder.clone(),
+            payload.share_bps,
+        )?;
+        Self::mark_meta_nonce_used(&env, &signer, nonce);
+        env.events().publish(
+            (
+                EVENT_META_SHARE_SET,
+                payload.issuer,
+                payload.namespace,
+                payload.token,
+            ),
+            (signer, payload.holder, payload.share_bps, nonce, expiry),
+        );
+        Ok(())
+    }
+
+    /// Meta-transaction authorization for a revenue report payload.
+    /// This does not mutate revenue data directly; it records a signed approval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn meta_approve_revenue_report(
+        env: Env,
+        signer: Address,
+        payload: MetaRevenueApprovalPayload,
+        nonce: u64,
+        expiry: u64,
+        signature: BytesN<64>,
+    ) -> Result<(), RevoraError> {
+        Self::require_not_frozen(&env)?;
+        Self::require_not_paused(&env);
+        let current_issuer = Self::get_current_issuer(
+            &env,
+            payload.issuer.clone(),
+            payload.namespace.clone(),
+            payload.token.clone(),
+        )
+        .ok_or(RevoraError::OfferingNotFound)?;
+        if current_issuer != payload.issuer {
+            return Err(RevoraError::OfferingNotFound);
+        }
+        let offering_id = OfferingId {
+            issuer: payload.issuer.clone(),
+            namespace: payload.namespace.clone(),
+            token: payload.token.clone(),
+        };
+        let configured_delegate: Address = env
+            .storage()
+            .persistent()
+            .get(&MetaDataKey::Delegate(offering_id.clone()))
+            .ok_or(RevoraError::NotAuthorized)?;
+        if configured_delegate != signer {
+            return Err(RevoraError::NotAuthorized);
+        }
+        let action = MetaAction::ApproveRevenueReport(payload.clone());
+        Self::verify_meta_signature(&env, &signer, nonce, expiry, action, &signature)?;
+        env.storage()
+            .persistent()
+            .set(
+                &MetaDataKey::RevenueApproved(offering_id, payload.period_id),
+                &true,
+            );
+        Self::mark_meta_nonce_used(&env, &signer, nonce);
+        env.events().publish(
+            (
+                EVENT_META_REV_APPROVE,
+                payload.issuer,
+                payload.namespace,
+                payload.token,
+            ),
+            (
+                signer,
+                payload.payout_asset,
+                payload.amount,
+                payload.period_id,
+                payload.override_existing,
+                nonce,
+                expiry,
+            ),
+        );
         Ok(())
     }
 
