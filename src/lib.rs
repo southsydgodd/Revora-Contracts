@@ -3988,6 +3988,8 @@ pub mod vesting;
 mod vesting_test;
 
 #[cfg(test)]
+mod test_utils;
+
 mod chunking_tests;
 mod test;
 mod test_auth;
